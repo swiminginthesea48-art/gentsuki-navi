@@ -124,12 +124,27 @@ function toast(msg, ms = 2500) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add('hidden'), ms);
 }
 
+/* ---------- Androidアプリ版 (Capacitor) のネイティブ機能 ---------- */
+const NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const BgGeo = NATIVE ? window.Capacitor.registerPlugin('BackgroundGeolocation') : null; // 画面オフでも測位
+const NativeTTS = NATIVE ? window.Capacitor.registerPlugin('TextToSpeech') : null;      // 画面オフでも音声
+
 /* ---------- 音声 ---------- */
 let jaVoice = null;
 function pickVoice() { jaVoice = speechSynthesis.getVoices().find((v) => v.lang && v.lang.startsWith('ja')) || null; }
-if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+if (!NATIVE && 'speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+function stopSpeech() {
+  if (NativeTTS) NativeTTS.stop().catch(() => {});
+  else if ('speechSynthesis' in window) speechSynthesis.cancel();
+}
 function speak(text, interrupt = false) {
-  if (!state.settings.voice || !('speechSynthesis' in window) || !text) return;
+  if (!state.settings.voice || !text) return;
+  if (NativeTTS) {
+    const say = () => NativeTTS.speak({ text, lang: 'ja-JP', rate: 1.05, category: 'playback', queueStrategy: interrupt ? 0 : 1 }).catch((e) => console.warn('TTS', e));
+    if (interrupt) NativeTTS.stop().catch(() => {}).finally(say); else say();
+    return;
+  }
+  if (!('speechSynthesis' in window)) return;
   if (interrupt) speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'ja-JP'; if (jaVoice) u.voice = jaVoice; u.rate = 1.05;
@@ -171,11 +186,35 @@ function startGeo() {
   // ① まず速い測位 (Wi-Fi・基地局、または端末が直近に測った位置) で即座に表示
   navigator.geolocation.getCurrentPosition(handleGeo, () => {}, { enableHighAccuracy: false, maximumAge: 60000, timeout: 5000 });
   // ② 並行して GPS の高精度測位を開始し、届き次第置き換える
+  if (NATIVE) { startNativeWatch(false); return; }
   geoWatch = navigator.geolocation.watchPosition(handleGeo, (e) => {
     if (e.code === e.TIMEOUT && state.pos) return; // 粗い位置は取れているので黙って待つ
     $('btnLocate').classList.remove('seeking');
     toast('現在地を取得できません: ' + e.message + '（地図をタップして出発地を指定できます）', 4000);
   }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 });
+}
+
+/* アプリ版: ナビ中は「バックグラウンド測位」(通知を出して画面オフ・別アプリ中も継続)、それ以外は通常測位 */
+let nativeWatchBg = null;
+async function startNativeWatch(background) {
+  if (!BgGeo || nativeWatchBg === background) return;
+  if (geoWatch != null) { const old = geoWatch; geoWatch = null; await BgGeo.removeWatcher({ id: old }).catch(() => {}); }
+  nativeWatchBg = background;
+  const opts = { requestPermissions: true, stale: false, distanceFilter: 0 };
+  if (background) { opts.backgroundTitle = '原付ナビ 案内中'; opts.backgroundMessage = '画面を消しても案内を続けます'; }
+  geoWatch = await BgGeo.addWatcher(opts, (loc, err) => {
+    if (err) {
+      $('btnLocate').classList.remove('seeking');
+      if (err.code === 'NOT_AUTHORIZED') {
+        toast('位置情報が許可されていません。設定アプリで「原付ナビ」の位置情報を許可してください', 6000);
+        if (confirm('位置情報の設定画面を開きますか？')) BgGeo.openSettings();
+      }
+      return;
+    }
+    if (!loc) return;
+    handleGeo({ timestamp: loc.time || Date.now(),
+      coords: { latitude: loc.latitude, longitude: loc.longitude, accuracy: loc.accuracy, speed: loc.speed, heading: loc.bearing } });
+  });
 }
 let centeredOnce = false;
 
@@ -649,7 +688,11 @@ function startNav(sim) {
   map.setZoom(17);
   const first = state.route.maneuvers[0];
   speak('ナビを開始します。' + (first.verbal_pre_transition_instruction || first.instruction || ''), true);
-  if (sim) startSim(); else { startGeo(); if (state.pos) navStep(state.pos); }
+  if (sim) startSim();
+  else {
+    if (NATIVE) startNativeWatch(true); else startGeo();
+    if (state.pos) navStep(state.pos);
+  }
 }
 
 function stopNav(arrived) {
@@ -661,7 +704,8 @@ function stopNav(arrived) {
   $('navLane').classList.add('hidden');
   document.body.classList.remove('navigating');
   $('speedo').classList.remove('over');
-  if (arrived) speak('目的地に到着しました。お疲れさまでした。', true); else speechSynthesis?.cancel();
+  if (arrived) speak('目的地に到着しました。お疲れさまでした。', true); else stopSpeech();
+  if (NATIVE && !nav.sim) startNativeWatch(false); // バックグラウンド測位を終了
   saveLog(nav.log, arrived);
   layers.route.clearLayers(); layers.marks.clearLayers();
   state.route = null; state.origin = null;
@@ -890,4 +934,4 @@ applySettingsUI();
 renderFavs();
 startGeo();
 // アプリ本体と一度見た地図をスマホに保存し、2回目以降の通信量と表示時間を減らす
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW登録失敗', e));
+if (!NATIVE && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW登録失敗', e));

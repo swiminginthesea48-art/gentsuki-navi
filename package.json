@@ -1,0 +1,15 @@
+{
+  "name": "gentsuki-navi",
+  "version": "1.0.0",
+  "private": true,
+  "description": "原付ナビ (Web / Android)",
+  "dependencies": {
+    "@capacitor-community/background-geolocation": "^1.3.1",
+    "@capacitor-community/text-to-speech": "^8.0.2",
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/core": "^8.6.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.6.2"
+  }
+}

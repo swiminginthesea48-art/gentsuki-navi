@@ -1,0 +1,70 @@
+# main に push するたびに Android アプリ (APK) をビルドし、
+# Releases の「latest」に置く (スマホからダウンロードしてインストール)
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Capacitor
+        run: npm install --no-audit --no-fund
+
+      - name: Collect web files
+        run: |
+          rm -rf www && mkdir www
+          cp -r index.html app.js style.css manifest.webmanifest icons www/
+
+      - name: Create Android project
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Patch Android project
+        run: bash scripts/patch-android.sh
+
+      - name: Build signed APK
+        working-directory: android
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+        run: |
+          if [ -z "$KS_B64" ]; then echo "::error::ANDROID_KEYSTORE_B64 secret is missing"; exit 1; fi
+          export KS_PATH="$RUNNER_TEMP/release.p12"
+          echo "$KS_B64" | base64 -d > "$KS_PATH"
+          export KS_ALIAS="$(keytool -list -v -storetype pkcs12 -keystore "$KS_PATH" -storepass "$KS_PASS" | grep -m1 'Alias name' | cut -d: -f2- | xargs)"
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Publish to Releases (latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk gentsuki-navi.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest gentsuki-navi.apk \
+            --title "原付ナビ Android版 (build ${{ github.run_number }})" \
+            --notes "スマホでこのページを開き、gentsuki-navi.apk をタップしてインストールしてください。" \
+            --latest
