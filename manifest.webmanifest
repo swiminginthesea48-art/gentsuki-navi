@@ -1,0 +1,10 @@
+{
+  "name": "原付ナビ",
+  "short_name": "原付ナビ",
+  "start_url": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#11161d",
+  "theme_color": "#11161d",
+  "lang": "ja"
+}

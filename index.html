@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#11161d">
+<title>原付ナビ</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="map"></div>
+
+<!-- 検索バー -->
+<div id="topbar">
+  <form id="searchForm" autocomplete="off">
+    <input id="q" type="search" placeholder="目的地を検索（施設名・住所）" enterkeyhint="search">
+    <button type="submit" aria-label="検索">🔍</button>
+  </form>
+  <button id="btnSettings" class="chip" aria-label="設定"><span id="vehicleChip">一種 30</span> ⚙</button>
+</div>
+<div id="results" class="sheet hidden"></div>
+
+<!-- ルート概要 -->
+<div id="routePanel" class="panel hidden">
+  <div class="panel-head">
+    <div>
+      <div id="routeSummary" class="big"></div>
+      <div id="routeSub" class="muted"></div>
+    </div>
+    <button id="btnCloseRoute" class="icon" aria-label="閉じる">✕</button>
+  </div>
+  <div id="routeWarn"></div>
+  <ol id="maneuverList"></ol>
+  <div class="btnrow">
+    <button id="btnSim" class="secondary">シミュレーション</button>
+    <button id="btnStart" class="primary">ナビ開始</button>
+  </div>
+</div>
+
+<!-- ナビ中 -->
+<div id="navBanner" class="hidden">
+  <div id="navIcon">↑</div>
+  <div class="navtext">
+    <div id="navDist">--</div>
+    <div id="navText">--</div>
+    <div id="navTwoStage" class="twostage hidden">⚠ 二段階右折</div>
+  </div>
+</div>
+<div id="navBottom" class="hidden">
+  <div><span id="navRemain">--</span><small>残り</small></div>
+  <div><span id="navEta">--:--</span><small>到着予定</small></div>
+  <button id="btnStop" class="danger">終了</button>
+</div>
+
+<div id="speedo">
+  <div id="speedVal">--</div>
+  <small>km/h</small>
+  <div id="speedLimit">30</div>
+</div>
+
+<div id="fabs">
+  <button id="btnFuel" class="fab" aria-label="近くのガソリンスタンド">⛽</button>
+  <button id="btnLocate" class="fab" aria-label="現在地">◎</button>
+</div>
+
+<!-- 設定 -->
+<div id="settingsModal" class="modal hidden">
+  <div class="modal-box">
+    <h2>設定</h2>
+    <label class="field">車両区分
+      <select id="setVehicle">
+        <option value="class1">原付一種（〜50cc / 新基準原付）法定30km/h・二段階右折あり</option>
+        <option value="class2">原付二種（〜125cc）法定60km/h・二段階右折なし</option>
+      </select>
+    </label>
+    <label class="field">幹線道路 <span class="muted">避ける ← → 気にしない</span>
+      <input id="setPrimary" type="range" min="0" max="1" step="0.1">
+    </label>
+    <label class="field">坂道 <span class="muted">避ける ← → 気にしない</span>
+      <input id="setHills" type="range" min="0" max="1" step="0.1">
+    </label>
+    <label class="check"><input id="setVoice" type="checkbox"> 音声案内</label>
+    <label class="check"><input id="setSpeedWarn" type="checkbox"> 速度超過の警告</label>
+    <label class="field">シミュレーション速度倍率
+      <select id="setSim"><option value="1">1倍</option><option value="4">4倍</option><option value="10">10倍</option><option value="30">30倍</option></select>
+    </label>
+    <button id="btnLogs" class="secondary wide">走行ログ</button>
+    <p class="muted small">ルート: Valhalla (FOSSGIS) / 地図・検索: © OpenStreetMap contributors。二段階右折は車線数データからの推定です。現地の標識を必ず優先してください。</p>
+    <button id="btnCloseSettings" class="primary wide">閉じる</button>
+  </div>
+</div>
+
+<div id="logModal" class="modal hidden">
+  <div class="modal-box">
+    <h2 id="logTitle">走行ログ</h2>
+    <div id="logBody"></div>
+    <button id="btnCloseLog" class="primary wide">閉じる</button>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
