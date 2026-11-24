@@ -20,6 +20,7 @@
   </form>
   <button id="btnSettings" class="chip" aria-label="設定"><span id="vehicleChip">一種 30</span> ⚙</button>
 </div>
+<div id="favbar"></div>
 <div id="results" class="sheet hidden"></div>
 
 <!-- ルート概要 -->
@@ -29,8 +30,12 @@
       <div id="routeSummary" class="big"></div>
       <div id="routeSub" class="muted"></div>
     </div>
-    <button id="btnCloseRoute" class="icon" aria-label="閉じる">✕</button>
+    <div class="head-btns">
+      <button id="btnFavRoute" class="icon" aria-label="目的地を登録">☆</button>
+      <button id="btnCloseRoute" class="icon" aria-label="閉じる">✕</button>
+    </div>
   </div>
+  <button id="btnOrigin" class="origin-btn">🛵 出発地：<b id="originName">現在地</b><span>変更 ▸</span></button>
   <div id="routeWarn"></div>
   <ol id="maneuverList"></ol>
   <div class="btnrow">
@@ -86,6 +91,9 @@
     <label class="field">シミュレーション速度倍率
       <select id="setSim"><option value="1">1倍</option><option value="4">4倍</option><option value="10">10倍</option><option value="30">30倍</option></select>
     </label>
+    <div class="field">登録地点 <span class="muted small">（地図をタップ →「自宅に設定」「お気に入りに追加」で登録）</span>
+      <div id="favManage"></div>
+    </div>
     <button id="btnLogs" class="secondary wide">走行ログ</button>
     <p class="muted small">ルート: Valhalla (FOSSGIS) / 地図・検索: © OpenStreetMap contributors。二段階右折は車線数データからの推定です。現地の標識を必ず優先してください。</p>
     <button id="btnCloseSettings" class="primary wide">閉じる</button>

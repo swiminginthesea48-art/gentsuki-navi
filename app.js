@@ -147,28 +147,57 @@ function handleGeo(gp) {
   const c = gp.coords;
   const p = { lat: c.latitude, lon: c.longitude, acc: c.accuracy, speed: c.speed, heading: c.heading, t: gp.timestamp };
   // speed/heading が取れない端末向けに前回位置から算出
-  if (lastFix) {
+  // 精度の良い位置を取得済みなら、後から届いた粗い位置 (Wi-Fi/基地局測位) で上書きしない
+  if (lastFix && p.acc > 100 && p.acc > lastFix.acc * 2 && p.t - lastFix.t < 15000) return;
+  if (lastFix && p.acc < 50 && lastFix.acc < 50) { // 粗い位置同士の比較は誤差が大きいので使わない
     const d = dist([lastFix.lat, lastFix.lon], [p.lat, p.lon]);
     const dt = (p.t - lastFix.t) / 1000;
     if ((p.speed == null || isNaN(p.speed)) && dt > 0) p.speed = d / dt;
     if ((p.heading == null || isNaN(p.heading)) && d > 3) p.heading = bearing([lastFix.lat, lastFix.lon], [p.lat, p.lon]);
   }
   lastFix = p;
+  if (p.acc < 200 && Date.now() - lastSaved > 30000) { // 次回起動時にすぐ表示するため保存
+    lastSaved = Date.now();
+    localStorage.setItem('gn.lastpos', JSON.stringify({ lat: p.lat, lon: p.lon, t: Date.now() }));
+  }
   onPosition(p);
 }
+let lastSaved = 0;
 let geoWatch = null;
 function startGeo() {
   if (!('geolocation' in navigator)) { toast('この端末は位置情報に対応していません'); return; }
   if (geoWatch != null) return;
+  $('btnLocate').classList.add('seeking');
+  // ① まず速い測位 (Wi-Fi・基地局、または端末が直近に測った位置) で即座に表示
+  navigator.geolocation.getCurrentPosition(handleGeo, () => {}, { enableHighAccuracy: false, maximumAge: 60000, timeout: 5000 });
+  // ② 並行して GPS の高精度測位を開始し、届き次第置き換える
   geoWatch = navigator.geolocation.watchPosition(handleGeo, (e) => {
+    if (e.code === e.TIMEOUT && state.pos) return; // 粗い位置は取れているので黙って待つ
+    $('btnLocate').classList.remove('seeking');
     toast('現在地を取得できません: ' + e.message + '（地図をタップして出発地を指定できます）', 4000);
-  }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+  }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 });
 }
 let centeredOnce = false;
 
+// 前回の位置を起動直後に表示 (測位が終わるまでの仮表示)
+(function showLastKnown() {
+  try {
+    const lp = JSON.parse(localStorage.getItem('gn.lastpos') || 'null');
+    if (lp && Date.now() - lp.t < 7 * 86400000) map.setView([lp.lat, lp.lon], 16);
+  } catch { /* 無視 */ }
+})();
+
+let accCircle = null;
 function onPosition(p) {
   state.pos = p;
   updateUserMarker(p);
+  // 精度の円 (粗い位置のときだけ表示)
+  const coarse = p.acc != null && p.acc > 30;
+  $('btnLocate').classList.toggle('seeking', coarse);
+  if (coarse) {
+    if (!accCircle) accCircle = L.circle([p.lat, p.lon], { radius: p.acc, color: '#2f9bff', weight: 1, fillOpacity: 0.12, interactive: false }).addTo(map);
+    else accCircle.setLatLng([p.lat, p.lon]).setRadius(p.acc);
+  } else if (accCircle) { map.removeLayer(accCircle); accCircle = null; }
   updateSpeed(p.speed);
   if (!centeredOnce) { centeredOnce = true; if (!state.route) map.setView([p.lat, p.lon], 16); }
   if (state.nav) navStep(p);
@@ -205,11 +234,112 @@ function showResults(items, head) {
   box.querySelectorAll('.item').forEach((el) => el.addEventListener('click', () => {
     const r = items[+el.dataset.i];
     box.classList.add('hidden'); $('q').blur();
-    setDestination(r);
+    pickPlace(r);
   }));
 }
-$('q').addEventListener('focus', () => { if (!$('q').value && recentList().length) showResults(recentList(), '最近の目的地'); });
-$('q').addEventListener('input', () => { if (!$('q').value) showResults(recentList(), recentList().length ? '最近の目的地' : ''); });
+/* ---------- 自宅・お気に入り ---------- */
+function favs() { try { return JSON.parse(localStorage.getItem('gn.favs') || '[]'); } catch { return []; } }
+function saveFavs(list) { localStorage.setItem('gn.favs', JSON.stringify(list)); renderFavs(); }
+const favLabel = (f) => (f.home ? '🏠 ' : '⭐ ') + f.name;
+const samePlace = (a, b) => dist([a.lat, a.lon], [b.lat, b.lon]) < 30;
+
+function setHome(place) {
+  saveFavs([{ name: '自宅', home: true, lat: place.lat, lon: place.lon }, ...favs().filter((f) => !f.home)]);
+  toast('🏠 自宅を登録しました');
+}
+function addFavorite(place) {
+  const name = (prompt('登録名を入力してください', place.name && place.name !== '指定地点' ? place.name : '') || '').trim();
+  if (!name) return false;
+  saveFavs([...favs().filter((f) => f.home || !samePlace(f, place)), { name, lat: place.lat, lon: place.lon }]);
+  toast(`⭐「${name}」を登録しました`);
+  return true;
+}
+function goFav(f) { setDestination({ name: f.home ? '自宅' : f.name, lat: f.lat, lon: f.lon, fav: true }); }
+
+function renderFavs() {
+  const list = favs(), home = list.find((f) => f.home), others = list.filter((f) => !f.home);
+  // 検索欄の下のショートカット
+  const bar = $('favbar'); bar.innerHTML = '';
+  const homeBtn = document.createElement('button');
+  homeBtn.textContent = '🏠 自宅';
+  if (!home) homeBtn.classList.add('unset');
+  homeBtn.onclick = () => home ? goFav(home) : toast('地図で自宅の場所をタップし「🏠 自宅に設定」を選んでください', 4000);
+  bar.appendChild(homeBtn);
+  for (const f of others) {
+    const b = document.createElement('button'); b.textContent = favLabel(f); b.onclick = () => goFav(f); bar.appendChild(b);
+  }
+  // 設定画面の管理リスト
+  const m = $('favManage');
+  m.innerHTML = list.length ? '' : '<p class="muted small">まだ登録がありません</p>';
+  list.forEach((f) => {
+    const row = document.createElement('div'); row.className = 'favrow';
+    row.innerHTML = `<span>${esc(favLabel(f))}</span>${f.home ? '' : '<button data-a="ren">名前変更</button>'}<button data-a="del">削除</button>`;
+    row.querySelector('[data-a=del]').onclick = () => {
+      if (confirm(`「${f.home ? '自宅' : f.name}」を削除しますか？`)) saveFavs(favs().filter((x) => !samePlace(x, f) || x.home !== f.home));
+    };
+    const ren = row.querySelector('[data-a=ren]');
+    if (ren) ren.onclick = () => {
+      const name = (prompt('新しい名前', f.name) || '').trim();
+      if (name) saveFavs(favs().map((x) => (!x.home && samePlace(x, f) ? { ...x, name } : x)));
+    };
+    m.appendChild(row);
+  });
+  updateFavStar();
+}
+function updateFavStar() {
+  const on = !!state.dest && favs().some((f) => samePlace(f, state.dest));
+  $('btnFavRoute').textContent = on ? '★' : '☆';
+  $('btnFavRoute').classList.toggle('on', on);
+}
+$('btnFavRoute').onclick = () => {
+  if (!state.dest) return;
+  const hit = favs().find((f) => samePlace(f, state.dest));
+  if (hit) { if (!hit.home && confirm(`「${hit.name}」の登録を解除しますか？`)) saveFavs(favs().filter((f) => f.home || !samePlace(f, hit))); }
+  else addFavorite(state.dest);
+  updateFavStar();
+};
+
+// 検索欄を選んだときは 登録地点 → 最近の目的地 を表示
+function quickList() {
+  const fl = favs().map((f) => ({ name: favLabel(f), sub: '登録地点', lat: f.lat, lon: f.lon, fav: true, realName: f.home ? '自宅' : f.name }));
+  const rl = recentList().filter((r) => !fl.some((f) => samePlace(f, r)));
+  return [...fl, ...rl];
+}
+function showQuick() {
+  if (pickingOrigin) { showOriginChoices(); return; }
+  const l = quickList(); showResults(l, l.length ? '登録地点・最近の目的地' : '');
+}
+$('q').addEventListener('focus', () => { if (!$('q').value) showQuick(); });
+$('q').addEventListener('input', () => { if (!$('q').value) showQuick(); });
+
+/* ---------- 出発地の指定 ---------- */
+let pickingOrigin = false;
+function showOriginChoices() {
+  showResults([{ name: '📍 現在地', sub: 'GPSの位置から出発', current: true }, ...quickList()], '出発地を選択（または上の欄で検索）');
+}
+function beginPickOrigin() {
+  pickingOrigin = true;
+  document.body.classList.add('picking-origin');
+  $('q').value = ''; $('q').placeholder = '出発地を検索';
+  showOriginChoices();
+}
+function endPickOrigin() {
+  pickingOrigin = false;
+  document.body.classList.remove('picking-origin');
+  $('q').placeholder = '目的地を検索（施設名・住所）';
+  $('q').value = state.dest ? state.dest.name : '';
+}
+function setOrigin(place) {
+  endPickOrigin();
+  if (place.current) state.origin = null;
+  else state.origin = { name: place.realName || place.name, lat: place.lat, lon: place.lon };
+  updateOriginLabel();
+  if (state.dest) planRoute(); else { drawEndpoints(); toast('出発地を設定しました。次に目的地を選んでください'); }
+}
+function updateOriginLabel() { $('originName').textContent = state.origin ? state.origin.name : '現在地'; }
+function pickPlace(r) { if (pickingOrigin) setOrigin(r); else setDestination(r); }
+$('btnOrigin').onclick = beginPickOrigin;
+map.on('click', () => { if (pickingOrigin) endPickOrigin(); });
 map.on('click', () => $('results').classList.add('hidden'));
 
 $('searchForm').addEventListener('submit', async (e) => {
@@ -243,21 +373,31 @@ map.on('contextmenu click', (e) => {
   if (state.nav) return;
   const ll = e.latlng;
   const div = document.createElement('div');
-  div.innerHTML = '<b>この地点</b><div class="popup-btns"><button data-a="dest">🏁 ここへ行く</button><button data-a="orig">🛵 ここから出発</button></div>';
+  div.innerHTML = '<b>この地点</b><div class="popup-btns"><button data-a="dest">🏁 ここへ行く</button><button data-a="orig">🛵 ここから出発</button>' +
+    '<button data-a="home">🏠 自宅に設定</button><button data-a="fav">⭐ お気に入りに追加</button></div>';
   const popup = L.popup().setLatLng(ll).setContent(div).openOn(map);
+  div.querySelector('[data-a=home]').onclick = () => {
+    map.closePopup(popup);
+    if (!favs().some((f) => f.home) || confirm('自宅の場所をここに変更しますか？')) setHome({ lat: ll.lat, lon: ll.lng });
+  };
+  div.querySelector('[data-a=fav]').onclick = () => { map.closePopup(popup); addFavorite({ name: '指定地点', lat: ll.lat, lon: ll.lng }); };
   div.querySelector('[data-a=dest]').onclick = () => { map.closePopup(popup); setDestination({ name: '指定地点', lat: ll.lat, lon: ll.lng }); };
   div.querySelector('[data-a=orig]').onclick = () => {
     map.closePopup(popup);
+    endPickOrigin();
     state.origin = { name: '指定した出発地', lat: ll.lat, lon: ll.lng };
+    updateOriginLabel();
     toast('出発地を設定しました');
     if (state.dest) planRoute(); else drawEndpoints();
   };
 });
 
 function setDestination(place) {
+  if (place.realName) place = { ...place, name: place.realName };
   state.dest = place;
-  if (place.name !== '指定地点') addRecent(place);
+  if (place.name !== '指定地点' && !place.fav) addRecent(place);
   $('q').value = place.name;
+  updateFavStar();
   if (state.nav) { reroute(state.pos, true); return; }
   planRoute();
 }
@@ -343,7 +483,10 @@ async function annotateTwoStage(route) {
 let planSeq = 0;
 async function planRoute() {
   const from = state.origin || state.pos;
-  if (!from) { toast('現在地が未取得です。地図をタップして「ここから出発」を指定してください', 4000); drawEndpoints(); return; }
+  if (!from) {
+    toast('現在地が未取得です。出発地を選んでください', 4000); drawEndpoints();
+    beginPickOrigin(); return;
+  }
   const seq = ++planSeq;
   toast('ルート探索中…', 10000);
   try {
@@ -384,6 +527,7 @@ const ICONS = { 1: '🛵', 2: '🛵', 3: '🛵', 4: '🏁', 5: '🏁', 6: '🏁'
 const iconFor = (m) => ICONS[m.type] || '↑';
 
 function showRoutePanel() {
+  updateOriginLabel();
   const r = state.route, v = vehicle();
   const ts = r.maneuvers.filter((m) => m.twoStage).length;
   $('routeSummary').textContent = `${fmtDur(r.time)}  ${fmtDist(r.length)}`;
@@ -414,11 +558,19 @@ $('btnCloseRoute').onclick = () => {
 function startNav(sim) {
   if (!state.route) return;
   if (!sim && state.origin) {
-    toast('出発地を指定したルートです。現在地からのナビにはシミュレーションを使うか、出発地を解除してください', 4000);
-    return;
+    const near = state.pos && dist([state.pos.lat, state.pos.lon], [state.origin.lat, state.origin.lon]) < 200;
+    if (!near) {
+      // 出発地が現在地と離れている → 現在地からのルートに引き直して案内
+      if (!state.pos) { toast('現在地が取得できていません。出発地で確認するには「シミュレーション」を使ってください', 4000); return; }
+      if (!confirm('指定した出発地は現在地から離れています。現在地からのルートで案内を始めますか？')) return;
+      state.origin = null;
+      planRoute().then(() => { if (state.route && !state.origin) startNav(false); });
+      return;
+    }
   }
   hideRoutePanel();
   $('topbar').classList.add('hidden'); $('results').classList.add('hidden');
+  document.body.classList.add('navigating');
   $('navBanner').classList.remove('hidden'); $('navBottom').classList.remove('hidden');
   state.follow = true; $('btnLocate').classList.remove('off');
   state.nav = { sim, idx: 0, offCount: 0, lastReroute: 0, announced: new Set(), rerouting: false,
@@ -437,6 +589,7 @@ function stopNav(arrived) {
   state.nav = null;
   if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
   $('navBanner').classList.add('hidden'); $('navBottom').classList.add('hidden'); $('topbar').classList.remove('hidden');
+  document.body.classList.remove('navigating');
   $('speedo').classList.remove('over');
   if (arrived) speak('目的地に到着しました。お疲れさまでした。', true); else speechSynthesis?.cancel();
   saveLog(nav.log, arrived);
@@ -646,6 +799,7 @@ for (const id of ['settingsModal', 'logModal']) $(id).addEventListener('click', 
 
 /* ---------- 起動 ---------- */
 applySettingsUI();
+renderFavs();
 startGeo();
 // アプリ本体と一度見た地図をスマホに保存し、2回目以降の通信量と表示時間を減らす
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW登録失敗', e));
