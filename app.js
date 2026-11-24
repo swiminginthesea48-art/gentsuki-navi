@@ -126,8 +126,14 @@ function toast(msg, ms = 2500) {
 
 /* ---------- Androidアプリ版 (Capacitor) のネイティブ機能 ---------- */
 const NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
-const BgGeo = NATIVE ? window.Capacitor.registerPlugin('BackgroundGeolocation') : null; // 画面オフでも測位
-const NativeTTS = NATIVE ? window.Capacitor.registerPlugin('TextToSpeech') : null;      // 画面オフでも音声
+function nativePlugin(name) {
+  try {
+    if (window.Capacitor.registerPlugin) return window.Capacitor.registerPlugin(name);
+    return (window.Capacitor.Plugins && window.Capacitor.Plugins[name]) || null;
+  } catch (e) { console.warn('plugin', name, e); return null; }
+}
+const BgGeo = NATIVE ? nativePlugin('BackgroundGeolocation') : null; // 画面オフでも測位
+const NativeTTS = NATIVE ? nativePlugin('TextToSpeech') : null;      // 画面オフでも音声
 
 /* ---------- 音声 ---------- */
 let jaVoice = null;
@@ -186,7 +192,7 @@ function startGeo() {
   // ① まず速い測位 (Wi-Fi・基地局、または端末が直近に測った位置) で即座に表示
   navigator.geolocation.getCurrentPosition(handleGeo, () => {}, { enableHighAccuracy: false, maximumAge: 60000, timeout: 5000 });
   // ② 並行して GPS の高精度測位を開始し、届き次第置き換える
-  if (NATIVE) { startNativeWatch(false); return; }
+  if (BgGeo) { startNativeWatch(false); return; }
   geoWatch = navigator.geolocation.watchPosition(handleGeo, (e) => {
     if (e.code === e.TIMEOUT && state.pos) return; // 粗い位置は取れているので黙って待つ
     $('btnLocate').classList.remove('seeking');
@@ -202,7 +208,16 @@ async function startNativeWatch(background) {
   nativeWatchBg = background;
   const opts = { requestPermissions: true, stale: false, distanceFilter: 0 };
   if (background) { opts.backgroundTitle = '原付ナビ 案内中'; opts.backgroundMessage = '画面を消しても案内を続けます'; }
-  geoWatch = await BgGeo.addWatcher(opts, (loc, err) => {
+  try {
+    geoWatch = await addNativeWatcher(opts);
+  } catch (e) {
+    console.warn('native watcher failed', e);
+    toast('位置情報の取得に失敗しました: ' + (e.message || e), 5000);
+    nativeWatchBg = null;
+  }
+}
+function addNativeWatcher(opts) {
+  return BgGeo.addWatcher(opts, (loc, err) => {
     if (err) {
       $('btnLocate').classList.remove('seeking');
       if (err.code === 'NOT_AUTHORIZED') {
@@ -690,7 +705,7 @@ function startNav(sim) {
   speak('ナビを開始します。' + (first.verbal_pre_transition_instruction || first.instruction || ''), true);
   if (sim) startSim();
   else {
-    if (NATIVE) startNativeWatch(true); else startGeo();
+    if (BgGeo) startNativeWatch(true); else startGeo();
     if (state.pos) navStep(state.pos);
   }
 }
@@ -705,7 +720,7 @@ function stopNav(arrived) {
   document.body.classList.remove('navigating');
   $('speedo').classList.remove('over');
   if (arrived) speak('目的地に到着しました。お疲れさまでした。', true); else stopSpeech();
-  if (NATIVE && !nav.sim) startNativeWatch(false); // バックグラウンド測位を終了
+  if (BgGeo && !nav.sim) startNativeWatch(false); // バックグラウンド測位を終了
   saveLog(nav.log, arrived);
   layers.route.clearLayers(); layers.marks.clearLayers();
   state.route = null; state.origin = null;

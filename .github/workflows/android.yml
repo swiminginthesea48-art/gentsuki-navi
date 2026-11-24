@@ -36,6 +36,10 @@ jobs:
         run: |
           rm -rf www && mkdir www
           cp -r index.html app.js style.css manifest.webmanifest icons www/
+          # アプリ版では Capacitor 本体 (プラグイン呼び出しに必要) を app.js より先に読み込む
+          cp node_modules/@capacitor/core/dist/capacitor.js www/capacitor.js
+          sed -i 's#<script src="app.js"></script>#<script src="capacitor.js"></script>\n<script src="app.js"></script>#' www/index.html
+          grep -q 'capacitor.js' www/index.html
 
       - name: Create Android project
         run: |
