@@ -42,9 +42,15 @@ const state = {
 };
 
 /* ---------- 地図 ---------- */
-const map = L.map('map', { zoomControl: false, attributionControl: true }).setView([35.681, 139.767], 14);
+// 大阪周辺 (関西中心部) をメインに使う前提の設定
+const HOME_AREA = { center: [34.7025, 135.4959], // 大阪駅
+  // 検索対象範囲: 神戸〜京都〜奈良〜和歌山北部
+  viewbox: { west: 134.95, north: 35.10, east: 136.10, south: 34.20 } };
+
+const map = L.map('map', { zoomControl: false, attributionControl: true }).setView(HOME_AREA.center, 13);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  maxZoom: 18, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  updateWhenIdle: true, keepBuffer: 1, // 移動中のタイル読み込みを減らして通信量を節約
 }).addTo(map);
 
 const layers = {
@@ -211,14 +217,17 @@ $('searchForm').addEventListener('submit', async (e) => {
   const q = $('q').value.trim(); if (!q) return;
   showResults([], '検索中…');
   try {
-    const c = state.pos || map.getCenter();
-    const lat = c.lat, lon = c.lon ?? c.lng;
-    const params = new URLSearchParams({
-      format: 'jsonv2', q, countrycodes: 'jp', limit: '8', 'accept-language': 'ja',
-      viewbox: `${lon - 0.5},${lat + 0.5},${lon + 0.5},${lat - 0.5}`, // 近くを優先 (bounded ではない)
-    });
-    const res = await fetch(`${NOMINATIM}?${params}`);
-    const data = await res.json();
+    const vb = HOME_AREA.viewbox;
+    const search = async (bounded) => {
+      const params = new URLSearchParams({
+        format: 'jsonv2', q, countrycodes: 'jp', limit: '8', 'accept-language': 'ja',
+        viewbox: `${vb.west},${vb.north},${vb.east},${vb.south}`, bounded: bounded ? '1' : '0',
+      });
+      return (await fetch(`${NOMINATIM}?${params}`)).json();
+    };
+    // まず関西圏内だけで検索し、見つからなければ全国へ広げる
+    let data = await search(true);
+    if (!data.length) data = await search(false);
     const items = data.map((d) => {
       const parts = d.display_name.split(',').map((s) => s.trim());
       return { name: d.name || parts[0], sub: parts.slice(1, 5).reverse().join(' '), lat: +d.lat, lon: +d.lon };
@@ -638,3 +647,5 @@ for (const id of ['settingsModal', 'logModal']) $(id).addEventListener('click', 
 /* ---------- 起動 ---------- */
 applySettingsUI();
 startGeo();
+// アプリ本体と一度見た地図をスマホに保存し、2回目以降の通信量と表示時間を減らす
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW登録失敗', e));
