@@ -415,12 +415,17 @@ async function fetchRoute(from, to) {
   const v = vehicle();
   const start = { lat: from.lat, lon: from.lon, type: 'break' };
   if (from.heading != null && !isNaN(from.heading)) { start.heading = Math.round(from.heading); start.heading_tolerance = 60; }
-  const data = await valhalla('route', {
+  const body = {
     locations: [start, { lat: to.lat, lon: to.lon, type: 'break' }],
     costing: 'motor_scooter',
     costing_options: { motor_scooter: { top_speed: v.topSpeed, use_primary: +state.settings.usePrimary, use_hills: +state.settings.useHills } },
     directions_options: { language: 'ja-JP', units: 'kilometers' },
-  });
+  };
+  // 案内文(通常形式) と 車線情報(OSRM形式) を並行して取得
+  const [data, laneSteps] = await Promise.all([
+    valhalla('route', body),
+    valhalla('route', { ...body, format: 'osrm' }).then((d) => d.routes[0].legs[0].steps).catch(() => null),
+  ]);
   const leg = data.trip.legs[0];
   const coords = decodePolyline(leg.shape);
   const cum = [0];
@@ -438,11 +443,71 @@ async function fetchRoute(from, to) {
     })),
     twoStageChecked: false,
   };
-  if (v.twoStage) {
-    try { await annotateTwoStage(route); route.twoStageChecked = true; }
-    catch (e) { console.warn('二段階右折の判定に失敗', e); }
-  }
+  attachTurnLanes(route, laneSteps);
+  try { await annotateRoadInfo(route, v.twoStage); route.twoStageChecked = v.twoStage; }
+  catch (e) { console.warn('車線数の取得に失敗', e); }
+  for (const m of route.maneuvers) m.lane = laneAdvice(m, v);
   return route;
+}
+
+/* OSRM形式の各ステップにある「交差点手前の車線(左→右)と進める方向」を、位置で各案内に対応付ける */
+function attachTurnLanes(route, steps) {
+  if (!steps) return;
+  for (const st of steps) {
+    const it = st.intersections && st.intersections[0];
+    if (!it || !it.lanes || !it.lanes.length) continue;
+    const loc = [st.maneuver.location[1], st.maneuver.location[0]];
+    let best = null, bd = 25;
+    for (const m of route.maneuvers) { const d = dist(loc, route.coords[m.begin_shape_index]); if (d < bd) { bd = d; best = m; } }
+    if (best) best.turnLanes = it.lanes.map((l) => ({ ind: l.indications || [], valid: !!l.valid }));
+  }
+}
+
+/* ---------- 車線案内 ---------- */
+function turnDir(type) {
+  if ([9, 10, 11, 23].includes(type)) return 'right';
+  if ([14, 15, 16, 24].includes(type)) return 'left';
+  if ([7, 8, 22].includes(type)) return 'straight';
+  return null;
+}
+const range = (a, b) => Array.from({ length: Math.max(0, b - a + 1) }, (_, i) => a + i);
+function describeLanes(rec, n) {
+  if (rec.length === n) return 'どの車線でも可';
+  const a = rec[0], b = rec[rec.length - 1];
+  if (a === 0 && b === 0) return '一番左の車線';
+  if (a === n - 1) return '一番右の車線';
+  if (a === 0) return `左から${b + 1}車線目まで`;
+  if (b === n - 1) return rec.length === 1 ? `右から${n - a}番目の車線` : `右側${rec.length}車線`;
+  return rec.length === 1 ? `左から${a + 1}番目の車線` : `左から${a + 1}〜${b + 1}番目の車線`;
+}
+/* 推奨車線を決める
+ *  原付一種: 道交法上、原則として一番左の車線 (第一通行帯) を走る。3車線以上の右折は二段階右折、2車線以下は右折車線へ
+ *  原付二種: 交差点の車線指定 (右折レーン等) に従う。3車線以上の直進は一番右以外 */
+function laneAdvice(m, v) {
+  const dir = turnDir(m.type); if (!dir) return null;
+  const L = m.turnLanes, n = L ? L.length : (m.inLanes || 0);
+  if (n < 2) return null; // 片側1車線なら車線案内は不要
+  if (!L && [22, 23, 24].includes(m.type)) return null; // 分岐は車線指定データが無いと推定が不確か
+  const valid = L ? L.map((l, i) => (l.valid ? i : -1)).filter((i) => i >= 0) : [];
+  let rec;
+  if (dir === 'right' && m.twoStage) rec = [0];
+  else if (dir === 'right') rec = valid.length ? valid : [n - 1];
+  else if (dir === 'left') rec = valid.length ? [valid[0]] : [0];
+  else if (v.twoStage) rec = [valid.length ? valid[0] : 0];
+  else { rec = valid.length ? valid : range(0, n - 1); if (n >= 3 && rec.length > 1) rec = rec.filter((i) => i !== n - 1); }
+  const where = describeLanes(rec, n);
+  const text = m.twoStage ? `${where}のまま直進 → 二段階右折` : where === 'どの車線でも可' ? where : `${where}へ`;
+  return { n, rec, lanes: L || null, where, text, move: !rec.includes(0) };
+}
+const ARROW = { left: '←', 'slight left': '↖', 'sharp left': '↙', straight: '↑', 'slight right': '↗', right: '→', 'sharp right': '↘', uturn: '↶', none: '↑' };
+function laneHtml(adv) {
+  if (!adv || !adv.n) return '';
+  const cells = range(0, adv.n - 1).map((i) => {
+    const on = adv.rec.includes(i);
+    const ar = adv.lanes ? adv.lanes[i].ind.map((x) => ARROW[x] || '↑').join('') : (on ? '●' : '');
+    return `<span class="lane${on ? ' on' : ''}">${ar}</span>`;
+  }).join('');
+  return `<div class="lanes">${cells}</div>`;
 }
 
 // 「東京駅南口/Tokyo Station South Exit」のような多言語併記や路線番号を日本語名だけに整える
@@ -455,10 +520,11 @@ function cleanText(t) {
     .trim();
 }
 
-const RIGHT_TURNS =new Set([10, 11]); // Valhalla: 10=右折, 11=鋭角右折
-/* ルート上の各エッジの車線数を取得し、右折地点の進入路が3車線以上なら二段階右折とみなす */
-async function annotateTwoStage(route) {
-  const turns = route.maneuvers.filter((m) => RIGHT_TURNS.has(m.type));
+const RIGHT_TURNS = new Set([9, 10, 11]); // Valhalla: 9=斜め右, 10=右折, 11=鋭角右折
+/* ルート上の各エッジの車線数を取得し、各案内地点の進入路の車線数を記録。
+ * 原付一種では、右折地点の進入路が3車線以上なら二段階右折とみなす */
+async function annotateRoadInfo(route, twoStageRule) {
+  const turns = route.maneuvers.filter((m) => turnDir(m.type));
   if (!turns.length) return;
   const data = await valhalla('trace_attributes', {
     encoded_polyline: route.shape,
@@ -475,7 +541,7 @@ async function annotateTwoStage(route) {
     if (best && bestD < 15) {
       m.inLanes = best.lane_count || 1;
       m.inRoad = (best.names || [])[0] || '';
-      m.twoStage = m.inLanes >= 3;
+      m.twoStage = twoStageRule && RIGHT_TURNS.has(m.type) && m.inLanes >= 3;
     }
   }
 }
@@ -540,7 +606,10 @@ function showRoutePanel() {
   }
   $('routeWarn').innerHTML = warn;
   const list = $('maneuverList');
-  list.innerHTML = r.maneuvers.map((m, i) => `<li data-i="${i}"><span class="mi">${iconFor(m)}</span><span>${esc(m.instruction)}${m.twoStage ? '<br><span class="ts">⚠ 二段階右折</span>' : ''}</span><span class="md">${m.length ? fmtDist(m.length * 1000) : ''}</span></li>`).join('');
+  list.innerHTML = r.maneuvers.map((m, i) => `<li data-i="${i}"><span class="mi">${iconFor(m)}</span><span>${esc(m.instruction)}` +
+    (m.twoStage ? '<br><span class="ts">⚠ 二段階右折</span>' : '') +
+    (m.lane ? `<br><span class="lt">車線：${esc(m.lane.text)}</span>${laneHtml(m.lane)}` : '') +
+    `</span><span class="md">${m.length ? fmtDist(m.length * 1000) : ''}</span></li>`).join('');
   list.querySelectorAll('li').forEach((li) => li.addEventListener('click', () => {
     map.setView(r.coords[r.maneuvers[+li.dataset.i].begin_shape_index], 18);
   }));
@@ -589,6 +658,7 @@ function stopNav(arrived) {
   state.nav = null;
   if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
   $('navBanner').classList.add('hidden'); $('navBottom').classList.add('hidden'); $('topbar').classList.remove('hidden');
+  $('navLane').classList.add('hidden');
   document.body.classList.remove('navigating');
   $('speedo').classList.remove('over');
   if (arrived) speak('目的地に到着しました。お疲れさまでした。', true); else speechSynthesis?.cancel();
@@ -648,6 +718,15 @@ function navStep(p) {
   $('navDist').textContent = fmtDist(Math.max(0, to));
   $('navText').textContent = m.instruction || '';
   $('navTwoStage').classList.toggle('hidden', !m.twoStage);
+  // 車線案内: 交差点の 600m 手前から表示
+  const showLane = !!m.lane && to <= 600;
+  $('navLane').classList.toggle('hidden', !showLane);
+  if (showLane) {
+    document.documentElement.style.setProperty('--banner-h', $('navBanner').offsetHeight + 'px');
+    $('navLaneDiagram').innerHTML = laneHtml(m.lane);
+    $('navLaneText').textContent = m.lane.text;
+    $('navLane').classList.toggle('move', m.lane.move);
+  }
   $('navRemain').textContent = fmtDist(remain);
   const speed = vehicle().topSpeed / 3.6 * 0.6; // 信号待ち等を考慮した平均速度
   $('navEta').textContent = fmtClock(new Date(Date.now() + remain / speed * 1000));
@@ -661,9 +740,18 @@ const TWO_STAGE_MSG = '二段階右折です。交差点の左端を直進し、
 function announce(mi, m, to) {
   const a = state.nav.announced;
   const prevGap = mi > 0 ? m.at - state.route.maneuvers[mi - 1].at : Infinity;
+  const lane = m.lane;
+  // 車線変更が必要な交差点は 500m 手前 (または直前の案内を過ぎた直後) に早めに知らせる
+  if (lane && lane.move && !m.twoStage && to <= 500 && to > 120 && !a.has(mi + 'l')) {
+    a.add(mi + 'l');
+    const dirWord = { right: '右折', left: '左折', straight: '直進' }[turnDir(m.type)];
+    speak(`${Math.round(to / 100) * 100}メートル先、${dirWord}です。今のうちに、${lane.where}に移動してください。`);
+    if (to <= 300) a.add(mi + 'f');
+  }
   if (to <= 300 && to > 150 && prevGap > 350 && !a.has(mi + 'f')) {
     a.add(mi + 'f');
-    speak(`およそ300メートル先、${m.verbal_transition_alert_instruction || m.instruction}` + (m.twoStage ? '。' + TWO_STAGE_MSG : ''));
+    const laneMsg = m.twoStage ? '。' + TWO_STAGE_MSG : lane && lane.where !== 'どの車線でも可' ? `。${lane.where}を走行してください。` : '';
+    speak(`およそ300メートル先、${m.verbal_transition_alert_instruction || m.instruction}${laneMsg}`);
   }
   if (to <= 80 && !a.has(mi + 'n')) {
     a.add(mi + 'n'); a.add(mi + 'f');
