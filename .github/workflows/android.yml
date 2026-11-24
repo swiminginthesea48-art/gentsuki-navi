@@ -18,13 +18,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -53,7 +53,9 @@ jobs:
         run: |
           if [ -z "$KS_B64" ]; then echo "::error::ANDROID_KEYSTORE_B64 secret is missing"; exit 1; fi
           export KS_PATH="$RUNNER_TEMP/release.p12"
-          echo "$KS_B64" | base64 -d > "$KS_PATH"
+          # Windows から登録した値に混じる改行 (CR/LF) を取り除く
+          printf '%s' "$KS_B64" | tr -d '\r\n ' | base64 -d > "$KS_PATH"
+          export KS_PASS="$(printf '%s' "$KS_PASS" | tr -d '\r\n')"
           export KS_ALIAS="$(keytool -list -v -storetype pkcs12 -keystore "$KS_PATH" -storepass "$KS_PASS" | grep -m1 'Alias name' | cut -d: -f2- | xargs)"
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
